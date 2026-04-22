@@ -1,0 +1,14 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: Full K3s cleanup
+      shell: |
+        /usr/local/bin/k3s-uninstall.sh || true
+        /usr/local/bin/k3s-agent-uninstall.sh || true
+        rm -rf /etc/rancher/k3s /var/lib/rancher/k3s /var/lib/etcd /run/k3s
+        rm -f /etc/systemd/system/k3s* /etc/systemd/system/multi-user.target.wants/k3s*
+        systemctl daemon-reload
+      ignore_errors: yes
+
+

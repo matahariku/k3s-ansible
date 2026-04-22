@@ -1,0 +1,73 @@
+---
+- hosts: k3s_servers
+  become: yes
+  vars:
+    k3s_version: "v1.35.3+k3s1"
+    cluster_token: "HACluster2026"
+    first_server_ip: "192.168.1.87"
+    
+  tasks:
+    - name: Create K3s config directory
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: '0755'
+
+    - name: FIRST SERVER (ops1) - CLUSTER INIT
+      block:
+        - name: First server config.yaml
+          copy:
+            dest: /etc/rancher/k3s/config.yaml
+            content: |
+              cluster-init: true
+              token: "{{ cluster_token }}"
+              tls-san:
+                - "{{ first_server_ip }}"
+                - "192.168.1.88"
+                - "192.168.1.86"
+              etcd-snapshot-schedule-cron: "0 */6 * * *"
+              etcd-snapshot-retention: 5
+
+        - name: Install first K3s server
+          shell: |
+            curl -sfL https://get.k3s.io | \
+            INSTALL_K3S_VERSION="{{ k3s_version }}" \
+            sh -
+      when: inventory_hostname == "ops1"
+
+    - name: Wait first server ready
+      pause:
+        minutes: 2
+      run_once: true
+
+    - name: ADDITIONAL SERVERS (dev1, ceph-0)
+      block:
+        - name: Additional server config.yaml
+          copy:
+            dest: /etc/rancher/k3s/config.yaml
+            content: |
+              server: https://{{ first_server_ip }}:6443
+              token: "{{ cluster_token }}"
+              tls-san:
+                - "{{ first_server_ip }}"
+                - "192.168.1.88"
+                - "192.168.1.86"
+              etcd-snapshot-schedule-cron: "0 */6 * * *"
+              etcd-snapshot-retention: 5
+
+        - name: Install additional K3s servers
+          shell: |
+            curl -sfL https://get.k3s.io | \
+            INSTALL_K3S_VERSION="{{ k3s_version }}" \
+            sh -
+      when: inventory_hostname != "ops1"
+
+    - name: Wait for all nodes Ready
+      shell: |
+        for i in {1..24}; do
+          k3s kubectl get node {{ inventory_hostname }} 2>/dev/null | grep Ready && exit 0
+          sleep 10
+        done
+        exit 1
+      retries: 3
+      delay: 30
