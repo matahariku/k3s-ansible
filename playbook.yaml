@@ -1,0 +1,119 @@
+---
+- hosts: k3s_workers
+  become: yes
+  gather_facts: yes
+  vars:
+    k3s_url: "https://192.168.1.87:6443"
+    k3s_version: "v1.35.3+k3s1"
+    ansible_python_interpreter: /usr/bin/python3
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - iptables
+        state: present
+
+  tasks:
+    - name: Cleanup previous k3s-agent installation
+      block:
+        - systemd:
+            name: k3s-agent
+            state: stopped
+            enabled: no
+          ignore_errors: yes
+
+        - shell: /usr/local/bin/k3s-agent-uninstall.sh
+          ignore_errors: yes
+
+        - file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/rancher/k3s
+            - /var/lib/rancher/k3s
+            - /run/k3s
+            - /etc/systemd/system/k3s-agent.service
+            - /etc/systemd/system/k3s-agent.service.d
+
+        - shell: |
+            ip link delete cni0 || true
+            ip link delete flannel.1 || true
+            iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+          ignore_errors: yes
+
+    - name: Read k3s token from ops1
+      slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      delegate_to: localhost
+      run_once: yes
+      register: k3s_token_file
+
+    - name: Set k3s token fact
+      set_fact:
+        k3s_token: "{{ k3s_token_file.content | b64decode | trim }}"
+      run_once: yes
+
+    - name: Download k3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+        timeout: 30
+
+    - name: Test API TCP connectivity (port 6443)
+      wait_for:
+        host: "{{ k3s_url | regex_replace('https?://|:\\d+', '') }}"
+        port: 6443
+        state: started
+        timeout: 30
+        delay: 5
+      delegate_to: localhost
+
+    - name: Install k3s agent
+      shell: |
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        K3S_URL="{{ k3s_url }}" \
+        K3S_TOKEN="{{ k3s_token }}" \
+        sh /tmp/k3s-install.sh agent --flannel-iface=eth0
+      args:
+        creates: /etc/systemd/system/k3s-agent.service
+
+    - name: Ensure k3s-agent service is running and enabled
+      systemd:
+        name: k3s-agent
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      notify: 
+        - wait for node ready
+        - cleanup temp
+
+  handlers:
+    - name: Wait for node to become Ready
+      shell: |
+        for i in {1..24}; do
+          kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null | grep -q True && exit 0
+          sleep 5
+        done
+        exit 1
+      delegate_to: localhost
+      listen: wait for node ready
+
+    - name: Cleanup temp files
+      file:
+        path: /tmp/k3s-install.sh
+        state: absent
+      listen: cleanup temp
+
+
+
+
+
+
